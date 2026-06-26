@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>傾きで動く物理シミュレーション</title>
+  <title>傾き・加速度センサー 物理シミュレーション</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -68,7 +68,7 @@
 
 <canvas id="c"></canvas>
 
-<p id="hint">スマートフォンを傾けてください　/　マウスでも操作できます</p>
+<p id="hint">傾けて動かす・激しく振ると飛び散る　/　マウスでも操作できます</p>
 
 <div id="ui">
   <button class="btn" id="permBtn">📱 センサーを許可</button>
@@ -88,6 +88,15 @@ let W = 0, H = 0;
 // ── Gravity ──────────────────────────────────────────────────────────────
 const G_BASE = 700;   // px/s²
 let gx = 0, gy = G_BASE;
+
+// ── Accelerometer state ───────────────────────────────────────────────────
+let smoothAx  = 0, smoothAy = 0;   // smoothed linear acceleration (m/s²)
+let gravRollX = 0, gravRollY = 0, gravRollZ = 0; // rolling gravity estimate
+let shakeFlash = 0;   // 0–1, decays each frame
+let lastShake  = 0;   // timestamp of last shake trigger
+const SHAKE_THRESHOLD = 16;   // m/s² linear acceleration magnitude
+const SHAKE_COOLDOWN  = 600;  // ms between shakes
+const ACCEL_SCALE     = 50;   // device m/s² → screen px/s² for inertia
 
 // ── Mode ─────────────────────────────────────────────────────────────────
 let mode = 'sand';  // 'sand' | 'water'
@@ -168,9 +177,10 @@ function step() {
   clearGrid();
 
   for (const p of parts) {
-    // Gravity + friction
-    p.vx = (p.vx + gx * DT) * p.fr;
-    p.vy = (p.vy + gy * DT) * p.fr;
+    // Gravity + accelerometer inertia + friction
+    // Inertia: phone acceleration → particles pushed opposite direction
+    p.vx = (p.vx + (gx - smoothAx * ACCEL_SCALE) * DT) * p.fr;
+    p.vy = (p.vy + (gy + smoothAy * ACCEL_SCALE) * DT) * p.fr;
 
     // Speed cap
     const v2 = p.vx * p.vx + p.vy * p.vy;
@@ -273,6 +283,15 @@ function render() {
     }
   }
 
+  // ── Shake flash ──
+  if (shakeFlash > 0) {
+    ctx.globalAlpha = shakeFlash * 0.35;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+    shakeFlash = Math.max(0, shakeFlash - 0.07);
+  }
+
   // ── Gravity compass (corner indicator) ──
   drawCompass();
 }
@@ -332,27 +351,78 @@ function onOrientation(e) {
   gy = G_BASE * Math.sin(beta  * Math.PI / 180);
 }
 
-// iOS 13+ requires explicit permission
+// ── Device motion (accelerometer) ─────────────────────────────────────────
+function onMotion(e) {
+  // Use accelerationIncludingGravity + high-pass filter to isolate linear motion
+  const a = e.accelerationIncludingGravity;
+  if (!a) return;
+
+  const ax = a.x || 0, ay = a.y || 0, az = a.z || 0;
+
+  // Low-pass: track gravity direction
+  const lk = 0.06;
+  gravRollX = gravRollX * (1 - lk) + ax * lk;
+  gravRollY = gravRollY * (1 - lk) + ay * lk;
+  gravRollZ = gravRollZ * (1 - lk) + az * lk;
+
+  // High-pass: linear (user-caused) acceleration only
+  const linX = ax - gravRollX;
+  const linY = ay - gravRollY;
+  const linZ = az - gravRollZ;
+
+  // Smooth linear acceleration (low-pass for inertia effect)
+  const sk = 0.3;
+  smoothAx = smoothAx * (1 - sk) + linX * sk;
+  smoothAy = smoothAy * (1 - sk) + linY * sk;
+
+  // Shake detection
+  const mag = Math.sqrt(linX * linX + linY * linY + linZ * linZ);
+  const now = Date.now();
+  if (mag > SHAKE_THRESHOLD && now - lastShake > SHAKE_COOLDOWN) {
+    lastShake  = now;
+    shakeFlash = 1;
+    const impulse = 900;
+    for (const p of parts) {
+      p.vx += (Math.random() - 0.5) * impulse;
+      p.vy += (Math.random() - 0.5) * impulse;
+    }
+  }
+}
+
+// ── iOS 13+ requires explicit permission for both sensors ──────────────────
 const permBtn = document.getElementById('permBtn');
-if (
-  typeof DeviceOrientationEvent !== 'undefined' &&
-  typeof DeviceOrientationEvent.requestPermission === 'function'
-) {
+const needsPermission =
+  (typeof DeviceOrientationEvent !== 'undefined' &&
+   typeof DeviceOrientationEvent.requestPermission === 'function') ||
+  (typeof DeviceMotionEvent !== 'undefined' &&
+   typeof DeviceMotionEvent.requestPermission === 'function');
+
+if (needsPermission) {
   permBtn.style.display = '';
   permBtn.addEventListener('click', async () => {
     try {
-      const result = await DeviceOrientationEvent.requestPermission();
-      if (result === 'granted') {
+      const requests = [];
+      if (typeof DeviceOrientationEvent?.requestPermission === 'function')
+        requests.push(DeviceOrientationEvent.requestPermission());
+      if (typeof DeviceMotionEvent?.requestPermission === 'function')
+        requests.push(DeviceMotionEvent.requestPermission());
+
+      const results = await Promise.all(requests);
+      if (results.includes('granted')) {
         window.addEventListener('deviceorientation', onOrientation);
+        window.addEventListener('devicemotion', onMotion);
         permBtn.style.display = 'none';
-        document.getElementById('hint').textContent = '傾けて砂・水を動かしてみよう！';
+        document.getElementById('hint').textContent = '傾けて動かす・激しく振ると飛び散る！';
       }
     } catch (err) {
       console.error(err);
     }
   });
-} else if ('DeviceOrientationEvent' in window) {
-  window.addEventListener('deviceorientation', onOrientation);
+} else {
+  if ('DeviceOrientationEvent' in window)
+    window.addEventListener('deviceorientation', onOrientation);
+  if ('DeviceMotionEvent' in window)
+    window.addEventListener('devicemotion', onMotion);
 }
 
 // ── Mouse gravity (desktop fallback) ───────────────────────────────────────
