@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>水の輪投げ 3D</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      overflow: hidden;
+      background: #08080f;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #score {
+      position: fixed;
+      top: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(27,67,50,0.88);
+      color: #fff;
+      font-size: 15px;
+      font-weight: bold;
+      padding: 8px 24px;
+      border-radius: 30px;
+      border: 1.5px solid rgba(64,145,108,0.6);
+      pointer-events: none;
+      z-index: 10;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+
+    #btns {
+      position: fixed;
+      bottom: max(20px, env(safe-area-inset-bottom, 20px));
+      left: 0; right: 0;
+      display: flex;
+      justify-content: space-around;
+      padding: 0 50px;
+      z-index: 10;
+    }
+
+    .gbtn {
+      width: 76px; height: 76px;
+      border-radius: 50%;
+      border: 3px solid #9a6f1a;
+      background: radial-gradient(circle at 36% 34%, #ffe566, #f9c74f 55%, #c9952b);
+      color: rgba(0,0,0,0.42);
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 6px 14px rgba(0,0,0,0.55), inset 0 2px 5px rgba(255,255,255,0.35);
+      transition: transform 0.07s, box-shadow 0.07s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .gbtn.on {
+      transform: translateY(4px) scale(0.97);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5), inset 0 1px 3px rgba(255,255,255,0.2);
+    }
+
+    #hint {
+      position: fixed;
+      bottom: max(108px, calc(env(safe-area-inset-bottom, 0px) + 108px));
+      width: 100%;
+      text-align: center;
+      color: rgba(255,255,255,0.28);
+      font-size: 11px;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    #overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      z-index: 20;
+    }
+    #overlay.show { display: flex; }
+    #overlay h2 { color: #ffd60a; font-size: 30px; text-shadow: 0 0 24px rgba(255,214,10,0.5); }
+    #overlay p  { color: rgba(255,255,255,0.75); font-size: 15px; }
+    #restartBtn {
+      margin-top: 8px;
+      padding: 12px 34px;
+      border: none; border-radius: 30px;
+      background: #40916c; color: #fff;
+      font-size: 16px; cursor: pointer;
+      box-shadow: 0 4px 12px rgba(64,145,108,0.45);
+    }
+  </style>
+</head>
+<body>
+
+<div id="score">スコア:  0 / 6</div>
+<div id="btns">
+  <button class="gbtn" id="btnL">L</button>
+  <button class="gbtn" id="btnR">R</button>
+</div>
+<div id="hint">ボタン長押しで水流 / Z・X キーでも操作</div>
+
+<div id="overlay">
+  <h2>🎉 クリア！</h2>
+  <p>全 6 本の杭に輪が乗りました</p>
+  <button id="restartBtn">もう一度</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+'use strict';
+(() => {
+
+// ── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+document.body.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x08080f);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 15);
+
+// Rotate the whole game world for 3D perspective
+const world = new THREE.Group();
+world.rotation.y = 0.22;
+world.rotation.x = 0.04;
+scene.add(world);
+
+// ── Lighting ─────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xc8d8ff, 0.5));
+
+const sun = new THREE.DirectionalLight(0xfff8e7, 1.8);
+sun.position.set(6, 10, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -9, right: 9, top: 9, bottom: -9, near: 1, far: 40 });
+scene.add(sun);
+
+const waterGlow = new THREE.PointLight(0x4fc3f7, 2.8, 18);
+scene.add(waterGlow);
+
+scene.add(new THREE.PointLight(0x90e0ef, 0.8, 22).position.set(-5, 5, 7) && new THREE.PointLight(0x90e0ef, 0.8, 22));
+
+// ── Dimensions ───────────────────────────────────────────────────────────────
+const CW = 3.0;    // half-width  (x: ±3)
+const CH = 5.5;    // half-height (y: ±5.5)
+const CD = 1.0;    // half-depth  (z: ±1)
+const WT = 0.35;   // wall thickness
+
+// ── Materials ─────────────────────────────────────────────────────────────────
+const mPlastic = new THREE.MeshStandardMaterial({ color: 0x2d6a4f, roughness: 0.45, metalness: 0.06 });
+const mPlasticHi = new THREE.MeshStandardMaterial({ color: 0x52b788, roughness: 0.35, metalness: 0.06 });
+const mWater = new THREE.MeshStandardMaterial({
+  color: 0x0096c7, transparent: true, opacity: 0.28,
+  roughness: 0.05, metalness: 0.08, side: THREE.FrontSide,
+});
+const mGlass = new THREE.MeshPhysicalMaterial({
+  color: 0x99ddff, transparent: true, opacity: 0.09,
+  roughness: 0.0, metalness: 0.0, side: THREE.DoubleSide,
+});
+const mPeg = new THREE.MeshStandardMaterial({ color: 0xe0ecff, roughness: 0.08, metalness: 0.92 });
+
+// ── Build Container ───────────────────────────────────────────────────────────
+function mkBox(w, h, d) { return new THREE.BoxGeometry(w, h, d); }
+
+function wall(x, y, z, w, h, d, mat = mPlastic) {
+  const m = new THREE.Mesh(mkBox(w, h, d), mat);
+  m.position.set(x, y, z);
+  m.castShadow = m.receiveShadow = true;
+  world.add(m);
+  return m;
+}
+
+const TW = CW*2 + WT*2, TH = CH*2 + WT*2, TD = CD*2 + WT*2;
+
+// Back wall
+wall(0, 0, -(CD + WT/2), TW, TH, WT);
+// Side walls
+wall(-(CW + WT/2), 0, 0, WT, TH, TD);
+wall( (CW + WT/2), 0, 0, WT, TH, TD);
+// Top wall
+wall(0,  (CH + WT/2), 0, TW, WT, TD);
+// Bottom platform (thicker)
+wall(0, -(CH + WT), 0, TW + WT, WT*2, TD + WT);
+
+// Highlight bevel strips
+wall(-(CW + WT*0.48), 0, CD*0.1, WT*0.12, TH*0.97, TD*0.85, mPlasticHi);
+wall( (CW + WT*0.48), 0, CD*0.1, WT*0.12, TH*0.97, TD*0.85, mPlasticHi);
+
+// Water fill
+const waterMesh = new THREE.Mesh(mkBox(CW*2, CH*2, CD*2), mWater);
+world.add(waterMesh);
+
+// Front glass
+const fglass = new THREE.Mesh(new THREE.PlaneGeometry(TW, TH), mGlass);
+fglass.position.z = CD + WT/2;
+world.add(fglass);
+
+// ── Pegs ──────────────────────────────────────────────────────────────────────
+const PEG_LEN = 1.8;
+const PEG_RAD = 0.07;
+
+const pegDefs = [
+  { tipX: -(CW - PEG_LEN), tipY: -3.5, side: 'L' },
+  { tipX: -(CW - PEG_LEN), tipY: -0.5, side: 'L' },
+  { tipX: -(CW - PEG_LEN), tipY:  2.5, side: 'L' },
+  { tipX:  (CW - PEG_LEN), tipY: -2.0, side: 'R' },
+  { tipX:  (CW - PEG_LEN), tipY:  1.0, side: 'R' },
+  { tipX:  (CW - PEG_LEN), tipY:  4.0, side: 'R' },
+];
+
+const pegGeo = new THREE.CylinderGeometry(PEG_RAD, PEG_RAD, PEG_LEN, 10);
+const capGeo = new THREE.SphereGeometry(PEG_RAD * 1.5, 8, 6);
+
+for (const p of pegDefs) {
+  const mat = mPeg.clone();
+  const pegMesh = new THREE.Mesh(pegGeo, mat);
+  pegMesh.rotation.z = Math.PI / 2;  // lay horizontal
+  const cx = p.side === 'L' ? -(CW - PEG_LEN / 2) : (CW - PEG_LEN / 2);
+  pegMesh.position.set(cx, p.tipY, 0);
+  pegMesh.castShadow = true;
+  world.add(pegMesh);
+
+  const cap = new THREE.Mesh(capGeo, mat);
+  cap.position.set(p.tipX, p.tipY, 0);
+  world.add(cap);
+
+  p.mat      = mat;
+  p.occupied = false;
+}
+
+// ── Rings ─────────────────────────────────────────────────────────────────────
+const RING_MR = 0.42;
+const RING_TR = 0.12;
+
+const RING_COLORS = [
+  0xe63946, 0xe63946, 0xe63946, 0xe63946,
+  0xf4a261, 0xf4a261, 0xf4a261, 0xf4a261,
+];
+
+const ringGeo = new THREE.TorusGeometry(RING_MR, RING_TR, 12, 36);
+let rings = [];
+
+function initRings() {
+  for (const r of rings) world.remove(r.mesh);
+  rings = [];
+
+  for (let i = 0; i < 8; i++) {
+    const mat = new THREE.MeshPhysicalMaterial({
+      color: RING_COLORS[i],
+      roughness: 0.22,
+      metalness: 0.0,
+      clearcoat: 0.95,
+      clearcoatRoughness: 0.08,
+    });
+    const mesh = new THREE.Mesh(ringGeo, mat);
+    mesh.castShadow = true;
+
+    const x = (Math.random() - 0.5) * CW * 1.3;
+    const y = -CH + RING_MR + 0.1 + Math.random() * CH * 0.32;
+    const z = (Math.random() - 0.5) * CD * 0.7;
+
+    mesh.position.set(x, y, z);
+    // Torus lies in XY by default; rotate X by 90° → lies in XZ (horizontal)
+    mesh.rotation.x = Math.PI / 2 + (Math.random() - 0.5) * 0.45;
+    mesh.rotation.y = Math.random() * Math.PI * 2;
+
+    world.add(mesh);
+
+    rings.push({
+      x, y, z,
+      vx: (Math.random() - 0.5) * 0.4,
+      vy: 0,
+      vz: (Math.random() - 0.5) * 0.2,
+      spinY: mesh.rotation.y,
+      spinVY: (Math.random() - 0.5) * 1.2,
+      swayAmp: 0,
+      swayT: 0,
+      caught: null,
+      mesh,
+    });
+  }
+}
+
+// ── Bubble pool ───────────────────────────────────────────────────────────────
+const BUB_COUNT = 60;
+const bubGeo = new THREE.SphereGeometry(0.055, 6, 4);
+const bubBaseMat = new THREE.MeshStandardMaterial({
+  color: 0xaadce0, transparent: true, roughness: 0.2, metalness: 0.1,
+});
+const bubPool = [];
+for (let i = 0; i < BUB_COUNT; i++) {
+  const mat = bubBaseMat.clone();
+  const mesh = new THREE.Mesh(bubGeo, mat);
+  mesh.visible = false;
+  world.add(mesh);
+  bubPool.push({ mesh, mat, active: false, x:0, y:0, z:0, vx:0, vy:0, life:0, sc:1 });
+}
+
+function spawnBubble(side) {
+  const b = bubPool.find(b => !b.active);
+  if (!b) return;
+  b.active = true;
+  b.x = (side === 'L' ? -CW * 0.5 : CW * 0.5) + (Math.random() - 0.5) * 0.9;
+  b.y = -CH + 0.2;
+  b.z = (Math.random() - 0.5) * CD * 0.75;
+  b.vx = (Math.random() - 0.5) * 0.3;
+  b.vy = 1.5 + Math.random() * 2.2;
+  b.life = 1;
+  b.sc = 0.5 + Math.random() * 0.8;
+  b.mesh.visible = true;
+  b.mesh.scale.setScalar(b.sc);
+}
+
+function updateBubbles(dt) {
+  if (isL && Math.random() < 0.44) spawnBubble('L');
+  if (isR && Math.random() < 0.44) spawnBubble('R');
+  for (const b of bubPool) {
+    if (!b.active) continue;
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    b.life -= dt * 0.9;
+    if (b.life <= 0 || b.y > CH - 0.3) { b.active = false; b.mesh.visible = false; continue; }
+    b.mesh.position.set(b.x, b.y, b.z);
+    b.mat.opacity = Math.min(b.life * 0.72, 0.68);
+  }
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+let isL = false, isR = false;
+const elL = document.getElementById('btnL');
+const elR = document.getElementById('btnR');
+
+function setL(v) { isL = v; elL.classList.toggle('on', v); }
+function setR(v) { isR = v; elR.classList.toggle('on', v); }
+
+elL.addEventListener('pointerdown', e => { setL(true); e.preventDefault(); }, { passive: false });
+elR.addEventListener('pointerdown', e => { setR(true); e.preventDefault(); }, { passive: false });
+['pointerup','pointercancel','pointerleave'].forEach(t => {
+  elL.addEventListener(t, () => setL(false));
+  elR.addEventListener(t, () => setR(false));
+});
+window.addEventListener('keydown', e => {
+  if ('zZArrowLeft'.includes(e.key))  setL(true);
+  if ('xXArrowRight'.includes(e.key)) setR(true);
+});
+window.addEventListener('keyup', e => {
+  if ('zZArrowLeft'.includes(e.key))  setL(false);
+  if ('xXArrowRight'.includes(e.key)) setR(false);
+});
+
+// ── Game state ────────────────────────────────────────────────────────────────
+let score = 0;
+const scoreEl  = document.getElementById('score');
+const overlayEl = document.getElementById('overlay');
+
+function updateScore() { scoreEl.textContent = `スコア:  ${score} / ${pegDefs.length}`; }
+
+function restart() {
+  overlayEl.classList.remove('show');
+  score = 0;
+  updateScore();
+  for (const p of pegDefs) {
+    p.occupied = false;
+    p.mat.color.setHex(0xe0ecff);
+    p.mat.emissive.setHex(0x000000);
+  }
+  initRings();
+}
+document.getElementById('restartBtn').addEventListener('click', restart);
+
+// ── Physics ───────────────────────────────────────────────────────────────────
+const DT         = 1 / 60;
+const GRAVITY     = 7.8;
+const DRAG        = 0.934;
+const JET_F       = 22.0;
+const JET_SPREAD  = 0.38;
+const CATCH_DIST  = 0.62;
+const MAX_SPD     = 14;
+const RING_R      = RING_MR;
+
+function step() {
+  for (const r of rings) {
+    if (r.caught) {
+      // Settling sway animation
+      r.swayT += DT;
+      r.swayAmp *= 0.985;
+      r.mesh.rotation.z = r.swayAmp * Math.sin(r.swayT * 4.2);
+      continue;
+    }
+
+    // Gravity (y-up: gravity = -y)
+    r.vy -= GRAVITY * DT;
+
+    // Jet forces
+    const inL = r.x < 0.5;
+    const inR = r.x > -0.5;
+    if (isL && inL) { r.vy += JET_F * DT; r.vx += (Math.random() - 0.5) * JET_SPREAD; }
+    if (isR && inR) { r.vy += JET_F * DT; r.vx += (Math.random() - 0.5) * JET_SPREAD; }
+
+    // Z spring (keep rings visible)
+    r.vz -= r.z * 3.2 * DT;
+
+    // Drag
+    r.vx *= DRAG; r.vy *= DRAG; r.vz *= DRAG * 0.9;
+
+    // Speed cap
+    const spd = Math.hypot(r.vx, r.vy);
+    if (spd > MAX_SPD) { const s = MAX_SPD / spd; r.vx *= s; r.vy *= s; }
+
+    // Integrate
+    r.x += r.vx * DT; r.y += r.vy * DT; r.z += r.vz * DT;
+
+    // Wall collisions
+    if (r.x < -CW + RING_R) { r.x = -CW + RING_R; r.vx =  Math.abs(r.vx) * 0.26; }
+    if (r.x >  CW - RING_R) { r.x =  CW - RING_R; r.vx = -Math.abs(r.vx) * 0.26; }
+    if (r.y < -CH + RING_R) { r.y = -CH + RING_R; r.vy =  Math.abs(r.vy) * 0.12; r.vx *= 0.85; }
+    if (r.y >  CH - RING_R) { r.y =  CH - RING_R; r.vy = -Math.abs(r.vy) * 0.18; }
+    if (r.z < -CD + RING_TR){ r.z = -CD + RING_TR; r.vz =  Math.abs(r.vz) * 0.3; }
+    if (r.z >  CD - RING_TR){ r.z =  CD - RING_TR; r.vz = -Math.abs(r.vz) * 0.3; }
+
+    // Visual spin
+    r.spinVY *= 0.998;
+    r.spinY  += r.spinVY * DT;
+    r.mesh.rotation.y = r.spinY;
+
+    // Peg catch: ring moving downward past tip
+    if (r.vy < -0.05) {
+      for (const peg of pegDefs) {
+        if (peg.occupied) continue;
+        const dx = r.x - peg.tipX, dy = r.y - peg.tipY;
+        if (Math.hypot(dx, dy) < CATCH_DIST) {
+          r.caught  = peg;
+          peg.occupied = true;
+          r.x = peg.tipX;
+          r.y = peg.tipY - RING_R * 0.35;
+          r.z = 0;
+          r.vx = r.vy = r.vz = 0;
+          r.swayAmp = 0.35;
+          r.swayT   = 0;
+          r.mesh.rotation.x = Math.PI / 2 + 0.06;
+          r.mesh.rotation.y = 0;
+          // Peg turns green
+          peg.mat.color.setHex(0x52b788);
+          peg.mat.emissive.setHex(0x1a5c38);
+          peg.mat.emissiveIntensity = 0.3;
+          score++;
+          updateScore();
+          if (score >= pegDefs.length) setTimeout(() => overlayEl.classList.add('show'), 700);
+          break;
+        }
+      }
+    }
+
+    r.mesh.position.set(r.x, r.y, r.z);
+  }
+
+  // Ring–ring collisions (O(n²), n=8 → fast)
+  for (let i = 0; i < rings.length - 1; i++) {
+    if (rings[i].caught) continue;
+    for (let j = i + 1; j < rings.length; j++) {
+      if (rings[j].caught) continue;
+      const a = rings[i], b = rings[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d2 = dx*dx + dy*dy, md = RING_R * 2;
+      if (d2 >= md*md || d2 < 1e-5) continue;
+      const d = Math.sqrt(d2), nx = dx/d, ny = dy/d;
+      const ov = (md - d) * 0.52;
+      a.x -= nx*ov; a.y -= ny*ov;
+      b.x += nx*ov; b.y += ny*ov;
+      const dv = (a.vx-b.vx)*nx + (a.vy-b.vy)*ny;
+      if (dv > 0) {
+        a.vx -= dv*0.5*nx; a.vy -= dv*0.5*ny;
+        b.vx += dv*0.5*nx; b.vy += dv*0.5*ny;
+      }
+    }
+  }
+}
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+let time = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  time += DT;
+
+  // Animated water glow
+  waterGlow.intensity = 2.2 + Math.sin(time * 1.1) * 0.6;
+  waterGlow.position.set(
+    Math.sin(time * 0.35) * 1.8,
+    Math.sin(time * 0.28) * 2.0,
+    4
+  );
+
+  // Subtle water mesh bob
+  waterMesh.position.y = Math.sin(time * 0.55) * 0.04;
+
+  updateBubbles(DT);
+  step();
+  renderer.render(scene, camera);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+initRings();
+animate();
+
+})();
+</script>
+</body>
+</html>
