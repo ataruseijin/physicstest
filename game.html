@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>水の輪投げ</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d0d1a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// ── Logical canvas size ───────────────────────────────────────────────────────
+const LW = 320, LH = 560;
+canvas.width  = LW;
+canvas.height = LH;
+
+function fitCanvas() {
+  const s = Math.min(window.innerWidth / LW, window.innerHeight / LH);
+  canvas.style.width  = (LW * s) + 'px';
+  canvas.style.height = (LH * s) + 'px';
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+const TOP_H  = 48;   // score bar
+const SIDE   = 14;   // side frame
+const BOT_F  = 14;   // bottom frame (below water)
+const BTN_H  = 82;   // button area height
+
+const WL = SIDE;              // water left
+const WR = LW - SIDE;         // water right
+const WT = TOP_H + 12;        // water top
+const WB = LH - BTN_H - BOT_F; // water bottom
+const WW = WR - WL;           // water width
+const WH = WB - WT;           // water height
+
+const BTN_Y  = WB + BOT_F + (BTN_H - BOT_F) / 2;
+const BTN_R  = 32;
+const BTN_LX = WL + WW * 0.25;
+const BTN_RX = WR - WW * 0.25;
+
+// ── Pegs ─────────────────────────────────────────────────────────────────────
+// Horizontal rods sticking inward from side walls
+const PEG_LEN  = 56;
+const PEG_TK   = 5;
+
+const PEG_YS = [0.22, 0.47, 0.72]; // relative heights in water
+const pegs = [];
+
+PEG_YS.forEach(h => {
+  const y = WT + h * WH;
+  pegs.push({
+    x1: WL, x2: WL + PEG_LEN, y,
+    tipX: WL + PEG_LEN, tipY: y,
+    side: 'L', occupied: false,
+  });
+  pegs.push({
+    x1: WR - PEG_LEN, x2: WR, y: y + WH * 0.12,
+    tipX: WR - PEG_LEN, tipY: y + WH * 0.12,
+    side: 'R', occupied: false,
+  });
+});
+
+// ── Rings ─────────────────────────────────────────────────────────────────────
+const RING_R     = 18;  // outer radius
+const RING_INNER = 9;   // inner hole radius (visual only)
+const COLORS = ['#e63946','#e63946','#e63946','#e63946',
+                '#f4a261','#f4a261','#f4a261','#f4a261'];
+const CATCH_X = 30;  // horizontal snap tolerance
+const CATCH_Y = 20;  // vertical snap tolerance
+
+function makeRing(i) {
+  return {
+    x:     WL + RING_R * 2 + Math.random() * (WW - RING_R * 4),
+    y:     WB - RING_R - Math.random() * (WH * 0.28),
+    vx:    (Math.random() - 0.5) * 40,
+    vy:    Math.random() * 30,
+    color: COLORS[i],
+    caught: null,
+    swing: 0,   // sway angle when on peg
+  };
+}
+
+let rings = COLORS.map((_, i) => makeRing(i));
+let score   = 0;
+let cleared = false;
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+let btnL = false, btnR = false;
+const ptrs = new Map();
+
+function canvasXY(e) {
+  const r  = canvas.getBoundingClientRect();
+  const sx = LW / r.width, sy = LH / r.height;
+  return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+}
+function hitBtn(x, y, bx, by) {
+  return (x-bx)*(x-bx)+(y-by)*(y-by) < (BTN_R+14)*(BTN_R+14);
+}
+function refreshBtns() {
+  btnL = btnR = false;
+  for (const p of ptrs.values()) {
+    if (hitBtn(p.x, p.y, BTN_LX, BTN_Y)) btnL = true;
+    if (hitBtn(p.x, p.y, BTN_RX, BTN_Y)) btnR = true;
+  }
+}
+
+canvas.addEventListener('pointerdown', e => {
+  const p = canvasXY(e);
+  ptrs.set(e.pointerId, p);
+  refreshBtns();
+  // Restart on clear
+  if (cleared) restart();
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('pointermove', e => {
+  if (!ptrs.has(e.pointerId)) return;
+  ptrs.set(e.pointerId, canvasXY(e));
+  refreshBtns();
+  e.preventDefault();
+}, { passive: false });
+
+['pointerup','pointercancel'].forEach(t =>
+  canvas.addEventListener(t, e => { ptrs.delete(e.pointerId); refreshBtns(); })
+);
+
+// Keyboard (Z=left, X=right / arrows)
+window.addEventListener('keydown', e => {
+  if (e.key==='ArrowLeft'||e.key==='z'||e.key==='Z') btnL = true;
+  if (e.key==='ArrowRight'||e.key==='x'||e.key==='X') btnR = true;
+});
+window.addEventListener('keyup', e => {
+  if (e.key==='ArrowLeft'||e.key==='z'||e.key==='Z') btnL = false;
+  if (e.key==='ArrowRight'||e.key==='x'||e.key==='X') btnR = false;
+});
+
+function restart() {
+  rings = COLORS.map((_, i) => makeRing(i));
+  pegs.forEach(p => p.occupied = false);
+  score   = 0;
+  cleared = false;
+  bubbles.length = 0;
+}
+
+// ── Bubbles ───────────────────────────────────────────────────────────────────
+const bubbles = [];
+
+function spawnBubble(bx) {
+  bubbles.push({
+    x: bx + (Math.random() - 0.5) * 28,
+    y: WB - 4,
+    r: 2 + Math.random() * 4,
+    vx: (Math.random() - 0.5) * 22,
+    vy: -(70 + Math.random() * 130),
+    a: 0.55 + Math.random() * 0.45,
+  });
+}
+
+// ── Physics ───────────────────────────────────────────────────────────────────
+const DT      = 1/60;
+const GRAVITY = 440;    // px/s²
+const DRAG    = 0.924;  // water damping per frame
+const JET_UP  = 2100;   // upward jet force px/s²
+const JET_HRZ = 55;     // horizontal spread from jet
+
+function step() {
+  // Bubbles
+  if (btnL && Math.random() < 0.65) spawnBubble(BTN_LX);
+  if (btnR && Math.random() < 0.65) spawnBubble(BTN_RX);
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    b.x += b.vx * DT;
+    b.y += b.vy * DT;
+    b.a -= DT * 1.3;
+    if (b.a <= 0 || b.y < WT) bubbles.splice(i, 1);
+  }
+
+  // Rings
+  for (const r of rings) {
+    if (r.caught) {
+      r.swing *= 0.94;
+      continue;
+    }
+
+    // Gravity
+    r.vy += GRAVITY * DT;
+
+    // Jet (each button affects its half of the tank)
+    if (btnL && r.x < WL + WW * 0.56) {
+      r.vy -= JET_UP * DT;
+      r.vx += (Math.random() - 0.5) * JET_HRZ * DT * 60;
+    }
+    if (btnR && r.x > WL + WW * 0.44) {
+      r.vy -= JET_UP * DT;
+      r.vx += (Math.random() - 0.5) * JET_HRZ * DT * 60;
+    }
+
+    // Water drag
+    r.vx *= DRAG;
+    r.vy *= DRAG;
+
+    // Move
+    r.x += r.vx * DT;
+    r.y += r.vy * DT;
+
+    // Wall bounce
+    if (r.x - RING_R < WL) { r.x = WL + RING_R; r.vx =  Math.abs(r.vx) * 0.22; }
+    if (r.x + RING_R > WR) { r.x = WR - RING_R; r.vx = -Math.abs(r.vx) * 0.22; }
+    if (r.y - RING_R < WT) { r.y = WT + RING_R; r.vy =  Math.abs(r.vy) * 0.22; }
+    if (r.y + RING_R > WB) { r.y = WB - RING_R; r.vy = -Math.abs(r.vy) * 0.12; r.vx *= 0.88; }
+
+    // Peg catch: ring must be falling (vy > 0) and pass near tip
+    if (r.vy > 8) {
+      for (const peg of pegs) {
+        if (peg.occupied) continue;
+        if (Math.abs(r.x - peg.tipX) < CATCH_X && Math.abs(r.y - peg.tipY) < CATCH_Y) {
+          r.caught = peg;
+          r.x = peg.tipX;
+          r.y = peg.tipY + RING_R * 0.55;
+          r.vx = r.vy = 0;
+          r.swing = 1;
+          peg.occupied = true;
+          score++;
+          if (score >= pegs.length) cleared = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Ring–ring collision
+  for (let i = 0; i < rings.length; i++) {
+    if (rings[i].caught) continue;
+    for (let j = i+1; j < rings.length; j++) {
+      if (rings[j].caught) continue;
+      const a = rings[i], b = rings[j];
+      const ex = b.x-a.x, ey = b.y-a.y;
+      const d2 = ex*ex+ey*ey, md = RING_R*2;
+      if (d2 >= md*md || d2 < 0.01) continue;
+      const d  = Math.sqrt(d2), nx=ex/d, ny=ey/d, ov=(md-d)*0.5;
+      a.x -= nx*ov; a.y -= ny*ov;
+      b.x += nx*ov; b.y += ny*ov;
+      const dv = (a.vx-b.vx)*nx+(a.vy-b.vy)*ny;
+      if (dv > 0) {
+        a.vx -= dv*0.5*nx; a.vy -= dv*0.5*ny;
+        b.vx += dv*0.5*nx; b.vy += dv*0.5*ny;
+      }
+    }
+  }
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+let time = 0;
+
+function render() {
+  time += DT;
+  ctx.clearRect(0, 0, LW, LH);
+
+  // ── Body background ──
+  ctx.fillStyle = '#1a0a2e';
+  ctx.fillRect(0, 0, LW, LH);
+
+  // ── Green plastic outer shell ──
+  drawRoundRect(0, TOP_H, LW, LH - TOP_H, 20);
+  ctx.fillStyle = '#2d6a4f';
+  ctx.fill();
+
+  // Lighter green highlight (3D bevel)
+  drawRoundRect(3, TOP_H + 3, LW - 6, LH - TOP_H - 6, 18);
+  ctx.fillStyle = '#40916c';
+  ctx.fill();
+
+  // ── Score bar ──
+  drawRoundRect(0, 0, LW, TOP_H + 14, 16);
+  ctx.fillStyle = '#1b4332';
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 18px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`スコア  ${score} / ${pegs.length}`, LW / 2, TOP_H / 2 + 2);
+
+  // ── Water chamber ──
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(WL, WT, WW, WH);
+  ctx.clip();
+
+  // Water gradient
+  const wg = ctx.createLinearGradient(0, WT, 0, WB);
+  wg.addColorStop(0, '#0096c7');
+  wg.addColorStop(1, '#023e8a');
+  ctx.fillStyle = wg;
+  ctx.fillRect(WL, WT, WW, WH);
+
+  // Horizontal shimmer lines
+  ctx.strokeStyle = 'rgba(173, 232, 244, 0.1)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 12; i++) {
+    const y = WT + (i / 12) * WH + Math.sin(time * 0.5 + i * 1.1) * 2.5;
+    ctx.beginPath();
+    ctx.moveTo(WL, y);
+    ctx.lineTo(WR, y);
+    ctx.stroke();
+  }
+
+  // Light caustic flicker (top)
+  ctx.fillStyle = 'rgba(144, 224, 239, 0.06)';
+  for (let i = 0; i < 5; i++) {
+    const cx = WL + ((Math.sin(time * 0.4 + i * 1.7) * 0.5 + 0.5)) * WW;
+    const cy = WT + ((Math.sin(time * 0.3 + i * 2.3) * 0.5 + 0.5)) * WH * 0.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 18 + Math.sin(time + i) * 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── Bubbles ──
+  for (const b of bubbles) {
+    ctx.globalAlpha = b.a;
+    ctx.fillStyle = '#a8dadc';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.beginPath();
+    ctx.arc(b.x - b.r * 0.28, b.y - b.r * 0.32, b.r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // ── Pegs ──
+  for (const peg of pegs) {
+    // Drop shadow
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = PEG_TK + 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(peg.x1, peg.y + 3);
+    ctx.lineTo(peg.x2, peg.y + 3);
+    ctx.stroke();
+
+    // Body
+    ctx.strokeStyle = peg.occupied ? '#a0c4a0' : '#cfd8dc';
+    ctx.lineWidth = PEG_TK;
+    ctx.beginPath();
+    ctx.moveTo(peg.x1, peg.y);
+    ctx.lineTo(peg.x2, peg.y);
+    ctx.stroke();
+
+    // Top highlight
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(peg.x1, peg.y - 1.5);
+    ctx.lineTo(peg.x2, peg.y - 1.5);
+    ctx.stroke();
+
+    // Tip cap
+    ctx.fillStyle = peg.occupied ? '#74c69d' : '#eceff1';
+    ctx.beginPath();
+    ctx.arc(peg.tipX, peg.tipY, PEG_TK / 2 + 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── Rings ──
+  for (const ring of rings) {
+    const sway = ring.caught
+      ? Math.sin(time * 3.5 + ring.x) * ring.swing * 5
+      : 0;
+    drawRing(ring.x + sway, ring.y, ring.color, ring.caught ? 0.88 : 1);
+  }
+
+  ctx.restore(); // end water clip
+
+  // Inner frame border (drawn over water)
+  ctx.strokeStyle = '#1b4332';
+  ctx.lineWidth = SIDE + 2;
+  ctx.strokeRect(WL + (SIDE + 2) / 2, WT, WW - SIDE - 2, WH);
+
+  // Top water glint
+  ctx.fillStyle = 'rgba(144,224,239,0.55)';
+  ctx.fillRect(WL, WT, WW, 3);
+
+  // ── Button platform ──
+  ctx.fillStyle = '#1b4332';
+  ctx.fillRect(0, WB + BOT_F, LW, LH - WB - BOT_F);
+
+  drawButton(BTN_LX, BTN_Y, btnL, 'L');
+  drawButton(BTN_RX, BTN_Y, btnR, 'R');
+
+  // Key hint (desktop)
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('[Z]', BTN_LX, BTN_Y + BTN_R + 11);
+  ctx.fillText('[X]', BTN_RX, BTN_Y + BTN_R + 11);
+
+  // ── CLEAR overlay ──
+  if (cleared) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(WL, WT, WW, WH);
+    ctx.clip();
+    ctx.fillStyle = 'rgba(0,0,0,0.52)';
+    ctx.fillRect(WL, WT, WW, WH);
+    ctx.restore();
+
+    ctx.font = 'bold 30px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffd60a';
+    ctx.fillText('🎉 クリア！', LW / 2, LH / 2 - 22);
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillText('タップでリスタート', LW / 2, LH / 2 + 16);
+  }
+}
+
+// ── Draw helpers ──────────────────────────────────────────────────────────────
+function drawRing(cx, cy, color, alpha) {
+  ctx.globalAlpha = alpha * 0.22;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(cx + 1, cy + 3, RING_R, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = alpha;
+
+  // Donut (evenodd fill)
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, RING_R, 0, Math.PI * 2, false);
+  ctx.arc(cx, cy, RING_INNER, 0, Math.PI * 2, true);
+  ctx.fill('evenodd');
+
+  // Specular arc
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(cx, cy, RING_R - 1.5, Math.PI * 1.1, Math.PI * 1.75);
+  ctx.stroke();
+
+  ctx.globalAlpha = 1;
+}
+
+function drawButton(x, y, pressed, label) {
+  const oy = pressed ? 3 : 0;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.arc(x, y + 5, BTN_R, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body gradient
+  const g = ctx.createRadialGradient(x - 7, y - 6 + oy, 3, x, y + oy, BTN_R);
+  g.addColorStop(0, '#ffe566');
+  g.addColorStop(0.55, '#f9c74f');
+  g.addColorStop(1, '#c9952b');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y + oy, BTN_R, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Rim
+  ctx.strokeStyle = '#9a6f1a';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.font = `bold 14px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x, y + oy);
+}
+
+function drawRoundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+function loop() {
+  step();
+  render();
+  requestAnimationFrame(loop);
+}
+loop();
+
+})();
+</script>
+</body>
+</html>
