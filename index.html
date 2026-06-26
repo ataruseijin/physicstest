@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>傾きで動く物理シミュレーション</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #05050f;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      touch-action: none;
+    }
+
+    canvas { display: block; }
+
+    #ui {
+      position: fixed;
+      bottom: max(24px, env(safe-area-inset-bottom, 24px));
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+    }
+
+    .btn {
+      padding: 11px 22px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1.5px solid rgba(255, 255, 255, 0.25);
+      border-radius: 50px;
+      color: rgba(255, 255, 255, 0.88);
+      font-size: 14px;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      user-select: none;
+      -webkit-user-select: none;
+      transition: background 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+
+    .btn:hover  { background: rgba(255, 255, 255, 0.2); }
+    .btn:active { background: rgba(255, 255, 255, 0.3); transform: scale(0.96); }
+
+    #permBtn {
+      display: none;
+      background: rgba(255, 80, 80, 0.18);
+      border-color: rgba(255, 120, 120, 0.4);
+    }
+
+    #hint {
+      position: fixed;
+      top: max(16px, env(safe-area-inset-top, 16px));
+      width: 100%;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.38);
+      font-size: 12px;
+      pointer-events: none;
+      z-index: 10;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<p id="hint">スマートフォンを傾けてください　/　マウスでも操作できます</p>
+
+<div id="ui">
+  <button class="btn" id="permBtn">📱 センサーを許可</button>
+  <button class="btn" id="modeBtn">🏖 砂 ⇄ 🌊 水</button>
+  <button class="btn" id="resetBtn">↺ リセット</button>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+let W = 0, H = 0;
+
+// ── Gravity ──────────────────────────────────────────────────────────────
+const G_BASE = 700;   // px/s²
+let gx = 0, gy = G_BASE;
+
+// ── Mode ─────────────────────────────────────────────────────────────────
+let mode = 'sand';  // 'sand' | 'water'
+
+const CFG = {
+  sand: {
+    num:         260,
+    friction:    0.88,
+    restitution: 0.04,
+    maxSpeed:    700,
+    radius:      () => 4 + Math.random() * 2.5,
+    color: () => {
+      const v = 130 + Math.random() * 90;
+      return `rgb(${Math.min(255, (v + 55))|0},${(v * 0.74)|0},${(v * 0.36)|0})`;
+    },
+    bg: '#080400',
+  },
+  water: {
+    num:         240,
+    friction:    0.975,
+    restitution: 0.28,
+    maxSpeed:    900,
+    radius:      () => 6 + Math.random() * 3.5,
+    color: () => `hsl(${(195 + Math.random() * 30)|0},${(68 + Math.random() * 32)|0}%,${(44 + Math.random() * 26)|0}%)`,
+    bg: '#010510',
+  },
+};
+
+// ── Particles ─────────────────────────────────────────────────────────────
+let parts = [];
+
+function makePart() {
+  const c = CFG[mode];
+  const r = c.radius();
+  return {
+    x:   r + Math.random() * (W - 2 * r),
+    y:   r + Math.random() * (H * 0.45),
+    vx:  (Math.random() - 0.5) * 100,
+    vy:  Math.random() * 60,
+    r,
+    color: c.color(),
+    fr:   c.friction,
+    res:  c.restitution,
+    mxv:  c.maxSpeed,
+  };
+}
+
+function initParticles() {
+  parts = Array.from({ length: CFG[mode].num }, makePart);
+}
+
+// ── Spatial grid ───────────────────────────────────────────────────────────
+const CELL = 20;
+let gCols = 0, gRows = 0, grid = [];
+
+function initGrid() {
+  gCols = Math.ceil(W / CELL) + 1;
+  gRows = Math.ceil(H / CELL) + 1;
+  grid  = new Array(gCols * gRows).fill(null).map(() => []);
+}
+
+function clearGrid() {
+  for (let i = 0; i < grid.length; i++) grid[i].length = 0;
+}
+
+function addToGrid(p) {
+  const c = (p.x / CELL) | 0;
+  const r = (p.y / CELL) | 0;
+  if (c >= 0 && c < gCols && r >= 0 && r < gRows) {
+    grid[r * gCols + c].push(p);
+  }
+}
+
+// ── Physics step ──────────────────────────────────────────────────────────
+const DT = 1 / 60;
+
+function step() {
+  clearGrid();
+
+  for (const p of parts) {
+    // Gravity + friction
+    p.vx = (p.vx + gx * DT) * p.fr;
+    p.vy = (p.vy + gy * DT) * p.fr;
+
+    // Speed cap
+    const v2 = p.vx * p.vx + p.vy * p.vy;
+    if (v2 > p.mxv * p.mxv) {
+      const s = p.mxv / Math.sqrt(v2);
+      p.vx *= s; p.vy *= s;
+    }
+
+    // Integrate
+    p.x += p.vx * DT;
+    p.y += p.vy * DT;
+
+    // Wall collisions
+    if (p.x < p.r)     { p.x = p.r;     p.vx =  Math.abs(p.vx) * p.res; }
+    if (p.x > W - p.r) { p.x = W - p.r; p.vx = -Math.abs(p.vx) * p.res; }
+    if (p.y < p.r)     { p.y = p.r;     p.vy =  Math.abs(p.vy) * p.res; }
+    if (p.y > H - p.r) { p.y = H - p.r; p.vy = -Math.abs(p.vy) * p.res; }
+
+    addToGrid(p);
+  }
+
+  // Particle–particle collisions
+  for (const p of parts) {
+    const pc = (p.x / CELL) | 0;
+    const pr = (p.y / CELL) | 0;
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const nc = pc + dc, nr = pr + dr;
+        if (nc < 0 || nc >= gCols || nr < 0 || nr >= gRows) continue;
+        const cell = grid[nr * gCols + nc];
+        for (let i = 0; i < cell.length; i++) {
+          const q = cell[i];
+          if (q === p) continue;
+          const ex = q.x - p.x, ey = q.y - p.y;
+          const d2 = ex * ex + ey * ey;
+          const md = p.r + q.r;
+          if (d2 >= md * md || d2 < 1e-6) continue;
+          const d   = Math.sqrt(d2);
+          const nx  = ex / d, ny = ey / d;
+          const ov  = (md - d) * 0.52;
+          p.x -= nx * ov; p.y -= ny * ov;
+          q.x += nx * ov; q.y += ny * ov;
+          const dvn = (p.vx - q.vx) * nx + (p.vy - q.vy) * ny;
+          if (dvn > 0) {
+            const rest = Math.min(p.res, q.res);
+            const j = (1 + rest) * dvn * 0.5;
+            p.vx -= j * nx; p.vy -= j * ny;
+            q.vx += j * nx; q.vy += j * ny;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── Render ────────────────────────────────────────────────────────────────
+function render() {
+  ctx.fillStyle = CFG[mode].bg;
+  ctx.fillRect(0, 0, W, H);
+
+  if (mode === 'water') {
+    // Soft glow (additive blending)
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.12;
+    for (const p of parts) {
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * 2.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Core drop
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.88;
+    for (const p of parts) {
+      const g = ctx.createRadialGradient(
+        p.x - p.r * 0.32, p.y - p.r * 0.38, 0,
+        p.x, p.y, p.r
+      );
+      g.addColorStop(0, 'rgba(215, 248, 255, 0.96)');
+      g.addColorStop(0.48, p.color);
+      g.addColorStop(1, 'rgba(0, 15, 60, 0.04)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+  } else {
+    // Sand — flat circles + specular
+    for (const p of parts) {
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255, 245, 200, 0.32)';
+      ctx.beginPath();
+      ctx.arc(p.x - p.r * 0.28, p.y - p.r * 0.3, p.r * 0.38, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ── Gravity compass (corner indicator) ──
+  drawCompass();
+}
+
+function drawCompass() {
+  const cx = W - 38, cy = 38, radius = 14;
+  const len = Math.sqrt(gx * gx + gy * gy);
+  const nx  = len > 0 ? gx / len : 0;
+  const ny  = len > 0 ? gy / len : 1;
+
+  ctx.globalAlpha = 0.45;
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Dot
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.beginPath();
+  ctx.arc(cx + nx * (radius - 3), cy + ny * (radius - 3), 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Label
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('G', cx, cy + 3);
+  ctx.globalAlpha = 1;
+}
+
+// ── Animation loop ─────────────────────────────────────────────────────────
+function loop() {
+  step();
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ── Resize ─────────────────────────────────────────────────────────────────
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  initGrid();
+  initParticles();
+}
+window.addEventListener('resize', resize);
+
+// ── Device orientation ─────────────────────────────────────────────────────
+let hasOrientation = false;
+
+function onOrientation(e) {
+  hasOrientation = true;
+  const beta  = Math.max(-90, Math.min(90, e.beta  || 0));
+  const gamma = Math.max(-90, Math.min(90, e.gamma || 0));
+  gx = G_BASE * Math.sin(gamma * Math.PI / 180);
+  gy = G_BASE * Math.sin(beta  * Math.PI / 180);
+}
+
+// iOS 13+ requires explicit permission
+const permBtn = document.getElementById('permBtn');
+if (
+  typeof DeviceOrientationEvent !== 'undefined' &&
+  typeof DeviceOrientationEvent.requestPermission === 'function'
+) {
+  permBtn.style.display = '';
+  permBtn.addEventListener('click', async () => {
+    try {
+      const result = await DeviceOrientationEvent.requestPermission();
+      if (result === 'granted') {
+        window.addEventListener('deviceorientation', onOrientation);
+        permBtn.style.display = 'none';
+        document.getElementById('hint').textContent = '傾けて砂・水を動かしてみよう！';
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  });
+} else if ('DeviceOrientationEvent' in window) {
+  window.addEventListener('deviceorientation', onOrientation);
+}
+
+// ── Mouse gravity (desktop fallback) ───────────────────────────────────────
+window.addEventListener('mousemove', e => {
+  if (hasOrientation) return;
+  const cx = e.clientX / W - 0.5;   // -0.5 to 0.5
+  const cy = e.clientY / H - 0.5;
+  gx = cx * G_BASE * 2.2;
+  gy = G_BASE * 0.4 + cy * G_BASE * 1.8;
+});
+
+// ── Touch: shake particles ─────────────────────────────────────────────────
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const impulse = 600;
+  for (const p of parts) {
+    p.vx += (Math.random() - 0.5) * impulse;
+    p.vy += (Math.random() - 0.5) * impulse;
+  }
+}, { passive: false });
+
+// ── Buttons ────────────────────────────────────────────────────────────────
+document.getElementById('modeBtn').addEventListener('click', () => {
+  mode = mode === 'sand' ? 'water' : 'sand';
+  initGrid();
+  initParticles();
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  initParticles();
+});
+
+// ── Start ──────────────────────────────────────────────────────────────────
+resize();
+loop();
+
+})();
+</script>
+</body>
+</html>
